@@ -2,6 +2,8 @@
 
 Captures plugin windows from DAWs (Serum, Pro-Q, Kontakt, etc) in **OBS Studio**, without the need for `Display Capture`.
 
+![Moving a Serum window in Ableton while its OBS source follows it](docs/images/demo.gif)
+
 OBS's `Window Capture` can capture a DAW's main window, but plugin editors/windows open as separate *tool windows* that OBS doesn't list.
 
 **DAW Plugin Capture** can detect these windows and for each one, adds a `Window Capture` source for it directly to your OBS scene, exactly where the window is on screen. 
@@ -45,6 +47,8 @@ Download the latest version from Releases.
 5. **Capture:** Select a scene (click `↻ Scenes` to refresh). Then click `▶ Start`.
 
 Finally, open a plugin in your DAW. It should be visible in OBS.
+
+![Serum captured in OBS, with the DAW Plugin Capture plugin open in Ableton](docs/images/screenshot.png)
 
 When you're done, click `■ Stop`, or close the application or the plugin. All remaining sources created by `DAW Plugin Capture` will be removed.
 
