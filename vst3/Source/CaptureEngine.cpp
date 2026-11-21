@@ -739,7 +739,11 @@ void Engine::updateLayout (const juce::var& items)
     // Find the scene's Window Capture of the DAW, so plugin sources line up with it wherever it is on the
     // canvas. Without one, the canvas is assumed to show the whole monitor.
     auto& s = *capture;
-    const auto daw = GetAncestor (s.tracked.begin()->first, GA_ROOTOWNER);
+    // The DAW's main window: the end of the owner chain. (GA_ROOTOWNER follows GetParent(), which only
+    // returns the owner of popup windows, not of overlapped ones like Ableton's plugin windows.)
+    auto daw = s.tracked.begin()->first;
+    for (HWND owner; (owner = GetWindow (daw, GW_OWNER)) != nullptr;)
+        daw = owner;
     const auto dawClass = className (daw);
 
     const juce::var* best = nullptr;

@@ -169,7 +169,6 @@ winmm = ctypes.WinDLL("winmm")
 
 GWL_EXSTYLE = -20
 GW_OWNER = 4
-GA_ROOTOWNER = 3
 WS_EX_TOOLWINDOW = 0x80
 SWP_FRAME_ONLY = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020   # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -189,8 +188,6 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 user32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
 user32.GetWindow.restype = wt.HWND
 user32.GetWindow.argtypes = [wt.HWND, ctypes.c_uint]
-user32.GetAncestor.restype = wt.HWND
-user32.GetAncestor.argtypes = [wt.HWND, ctypes.c_uint]
 user32.MonitorFromWindow.restype = wt.HANDLE
 user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
 user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -462,7 +459,11 @@ class Engine:
         on the canvas. Without one, the canvas is assumed to show the whole monitor."""
         if not self.tracked:
             return
-        daw = user32.GetAncestor(next(iter(self.tracked)), GA_ROOTOWNER)
+        # The DAW's main window: the end of the owner chain. (GA_ROOTOWNER follows GetParent(), which only
+        # returns the owner of popup windows, not of overlapped ones like Ableton's plugin windows.)
+        daw = next(iter(self.tracked))
+        while user32.GetWindow(daw, GW_OWNER):
+            daw = user32.GetWindow(daw, GW_OWNER)
         exe, cls = exe_of(daw).lower(), class_name(daw)
         best = None
         for item in items:
