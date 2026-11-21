@@ -1,0 +1,90 @@
+# Builds the desktop app and the VST3 plugin on every push and pull request.
+# Pushing a version tag (for example v1.0.1) also creates a draft GitHub release with the binaries,
+# LICENSE and THIRD_PARTY_NOTICES.md attached and the matching CHANGELOG section as its notes.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read version
+        id: version
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'app'); import capture_core; print(capture_core.__version__)"
+          $cmake = (Select-String -Path vst3/CMakeLists.txt -Pattern 'project\(\S+ VERSION (\S+)').Matches[0].Groups[1].Value
+          if ($version -ne $cmake) { throw "Version mismatch: app $version, VST3 $cmake" }
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} doesn't match version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build desktop app
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r app/requirements.txt pyinstaller==6.22.3
+          python app/build_exe.py
+
+      - name: Build VST3 plugin
+        run: |
+          cmake -S vst3 -B vst3/build -A x64
+          cmake --build vst3/build --config Release
+
+      - name: Package
+        run: |
+          $out = New-Item -ItemType Directory -Force release
+          Copy-Item "dist/DAW Plugin Capture.exe" $out
+          Compress-Archive -Path "vst3/build/DAWPluginCapture_artefacts/Release/VST3/DAW Plugin Capture.vst3" `
+                           -DestinationPath "$out/DAW Plugin Capture.vst3.zip"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md $out
+          Get-ChildItem $out -File | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content "$out/SHA256SUMS.txt" -Encoding ascii
+          Get-Content "$out/SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DAW-Plugin-Capture-${{ steps.version.outputs.version }}
+          path: release/
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Release notes: the CHANGELOG section for this version.
+          awk -v v="## ${TAG#v}" '$0 == v {found=1; next} found && /^## / {exit} found' CHANGELOG.md > notes.md
+          gh release create "$TAG" release/* --draft --title "DAW Plugin Capture ${TAG#v}" --notes-file notes.md

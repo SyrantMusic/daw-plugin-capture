@@ -1,6 +1,6 @@
 # DAW Plugin Capture
 
-Captures plugin windows from DAWs (Serum, Pro-Q, Kontakt, etc) in **OBS Studio**, without needing to resort for `Display Capture`.
+Captures plugin windows from DAWs (Serum, Pro-Q, Kontakt, etc) in **OBS Studio**, without the need for `Display Capture`.
 
 ![Moving a Serum window in Ableton while its OBS source follows it](docs/images/demo.gif)
 
@@ -35,7 +35,7 @@ Download the latest version from Releases.
 ## Setup
 
 1. **OBS:** Go to `Tools → WebSocket Server Settings` and tick `Enable WebSocket server`. Click `Show Connect Info` to get the port and password. You may set a static secure password using any strong password generator online.
-2. **OBS:** Add a `Window Capture` of your DAW to a scene. Ensure that `Capture Method` is set to `Windows 10 (1903 and up)`. 
+2. **OBS:** Add a `Window Capture` of your DAW to a scene. Ensure that `Capture Method` is set to `Windows 10 (1903 and up)`. Plugin sources are lined up with this capture, so you can move, scale or crop it however you like (e.g. DAW in a corner next to your webcam) and plugins will still appear in the right place over it.
 3. Run `DAW Plugin Capture` (either the plugin or the desktop app).
 4. **Connection:** Enter the:
    - `host` - localhost is fine for most use cases.
@@ -63,8 +63,9 @@ When opening plugin windows in Ableton (or other similar DAW software with this 
 While capturing, **DAW Plugin Capture**:
 1. Periodically (every 0.25 seconds) checks for visible, owned windows in the DAW.
 2. Removes the `WS_EX_TOOLWINDOW` flag, allowing them to be captured by OBS. As these windows are *owned*, they will never have an entry in the taskbar or Alt-Tab, so no other changes occur.
-3. Adds a `Window Capture source` (named `DAWCapture N: <title>` ) in OBS using `obs-websocket`. The position of this source will always match the window (at the speed of the OBS frame rate). Scaling is also supported.
-4. If the window is closed or capturing is stopped, the source is removed, and the original `WS_EX_TOOLWINDOW` flag is restored.
+3. Adds a `Window Capture source` (named `DAWCapture N: <title>` ) in OBS using `obs-websocket`. The position of this source will always match the window (at the speed of the OBS frame rate), relative to your DAW's `Window Capture` in the scene. Scaling is also supported. The mouse cursor is captured too, so viewers can follow along.
+4. Keeps the sources stacked in the same order as the windows, so whichever plugin you click to the front is also in front on stream.
+5. If the window is closed or capturing is stopped, the source is removed, and the original `WS_EX_TOOLWINDOW` flag is restored.
 
 ## Privacy and Security
 
@@ -84,7 +85,7 @@ The plugin and desktop app will not run simultaneously. If both are running, the
 
 ## Limitations
 
-- Sources will be positioned assuming that the OBS canvas covers the entire monitor that the plugin window is on (e.g. 1920x1080 canvas if on 1080p screen). If not, scaling will be applied to the width.
+- Sources are lined up with your DAW's `Window Capture` in the same scene (not inside a group or nested scene). If it's rotated or flipped, or there isn't one, sources will be positioned assuming that the OBS canvas covers the entire monitor that the plugin window is on (e.g. 1920x1080 canvas if on 1080p screen).
 
 - **DAW Plugin Capture** is currently confirmed to remain performant and stable with up to 10 plugin windows open at once. Reliability is not guaranteed with large projects where `Auto-Open Plug-In Windows` is enabled in Ableton's settings and preferences.
 
@@ -130,6 +131,10 @@ cmake --build vst3/build --config Release
 The plugin will be generated at `vst3/build/DAWPluginCapture_artefacts/Release/VST3/`. 
 
 The C++ runtime is statically linked, so no Visual C++ redistributable is required.
+
+### Releases
+
+Every push and pull request is built by GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)). Pushing a version tag (e.g. `v1.0.1`) builds both versions and creates a draft release with the binaries, `LICENSE`, `THIRD_PARTY_NOTICES.md` and SHA-256 checksums attached, using that version's section of the [changelog](CHANGELOG.md) as release notes.
 
 ## Project Structure
 

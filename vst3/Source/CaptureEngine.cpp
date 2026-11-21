@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <optional>
 
 namespace pc
 {
@@ -53,6 +54,17 @@ RECT frameRect (HWND hwnd)
     return r;
 }
 
+/** Client area in screen coordinates. */
+RECT clientRect (HWND hwnd)
+{
+    RECT r {};
+    GetClientRect (hwnd, &r);
+    POINT origin {};
+    ClientToScreen (hwnd, &origin);
+    OffsetRect (&r, origin.x, origin.y);
+    return r;
+}
+
 RECT monitorRect (HWND hwnd)
 {
     MONITORINFO info {};
@@ -86,6 +98,83 @@ juce::String obsWindowString (const juce::String& title, const juce::String& cls
     return escape (title) + ":" + escape (cls) + ":" + exe;
 }
 
+/** {title, class, exe} from OBS's `window` setting, or empty. */
+juce::StringArray parseObsWindowString (const juce::String& value)
+{
+    auto parts = juce::StringArray::fromTokens (value, ":", "");
+    if (parts.size() != 3)
+        return {};
+    for (auto& part : parts)
+        part = part.replace ("#3A", ":").replace ("#22", "#");
+    return parts;
+}
+
+// obs_alignment flags
+constexpr int alignLeft = 1, alignRight = 2, alignTop = 4, alignBottom = 8;
+
+/** How far something sits into `space` when aligned to its low edge, high edge or centre. */
+double aligned (double space, int flags, int low, int high)
+{
+    return (flags & low) != 0 ? 0.0 : (flags & high) != 0 ? space : space / 2;
+}
+
+struct Placement
+{
+    double x = 0, y = 0, scaleX = 1, scaleY = 1;
+};
+
+/** Where a scene item draws its source: source pixel (u, v) lands on canvas point
+    (x + u * scaleX, y + v * scaleY). Empty if the item is rotated, flipped or not showing. */
+std::optional<Placement> sourceLayout (const juce::var& t)
+{
+    auto number = [&t] (const char* key, double fallback = 0.0) { return (double) t.getProperty (key, fallback); };
+    const double cropLeft = number ("cropLeft"), cropTop = number ("cropTop");
+    const double w = number ("sourceWidth") - cropLeft - number ("cropRight");
+    const double h = number ("sourceHeight") - cropTop - number ("cropBottom");
+    if (w <= 0 || h <= 0 || std::abs (number ("rotation")) > 0.01)
+        return {};
+
+    Placement p;
+    double boxW, boxH, offsetX = 0, offsetY = 0;
+    const auto bounds = t.getProperty ("boundsType", "OBS_BOUNDS_NONE").toString();
+    if (bounds == "OBS_BOUNDS_NONE")
+    {
+        p.scaleX = number ("scaleX", 1.0);
+        p.scaleY = number ("scaleY", 1.0);
+        boxW = w * p.scaleX;
+        boxH = h * p.scaleY;
+    }
+    else
+    {
+        boxW = number ("boundsWidth");
+        boxH = number ("boundsHeight");
+        const double fitW = boxW / w, fitH = boxH / h;
+        if (bounds == "OBS_BOUNDS_STRETCH")
+        {
+            p.scaleX = fitW;
+            p.scaleY = fitH;
+        }
+        else
+        {
+            p.scaleX = p.scaleY = bounds == "OBS_BOUNDS_SCALE_OUTER"     ? std::max (fitW, fitH)
+                                : bounds == "OBS_BOUNDS_SCALE_TO_WIDTH"  ? fitW
+                                : bounds == "OBS_BOUNDS_SCALE_TO_HEIGHT" ? fitH
+                                : bounds == "OBS_BOUNDS_MAX_ONLY"        ? std::min ({ 1.0, fitW, fitH })
+                                                                         : std::min (fitW, fitH);
+        }
+        const int inner = (int) number ("boundsAlignment");      // where the source sits inside its bounding box
+        offsetX = aligned (boxW - w * p.scaleX, inner, alignLeft, alignRight);
+        offsetY = aligned (boxH - h * p.scaleY, inner, alignTop, alignBottom);
+    }
+    if (p.scaleX <= 0 || p.scaleY <= 0)
+        return {};
+
+    const int alignment = (int) number ("alignment", alignLeft | alignTop);    // which point `position` refers to
+    p.x = number ("positionX") - aligned (boxW, alignment, alignLeft, alignRight) + offsetX - cropLeft * p.scaleX;
+    p.y = number ("positionY") - aligned (boxH, alignment, alignTop, alignBottom) + offsetY - cropTop * p.scaleY;
+    return p;
+}
+
 bool isLocalHost (juce::String host)
 {
     host = host.trim().toLowerCase();
@@ -111,6 +200,7 @@ struct EnumContext
     const juce::StringArray& ignore;
     const std::set<void*>& ownWindows;
     std::map<HWND, WindowInfo>& found;
+    std::vector<void*>& frontToBack;
 };
 
 HMODULE thisModule()
@@ -163,7 +253,10 @@ BOOL CALLBACK collectPluginWindow (HWND hwnd, LPARAM param)
 
     const auto r = frameRect (hwnd);
     if (r.right - r.left >= 50 && r.bottom - r.top >= 50)
+    {
         context.found[hwnd] = { title, cls };
+        context.frontToBack.push_back (hwnd);      // EnumWindows goes front to back
+    }
     return TRUE;
 }
 
@@ -221,7 +314,15 @@ struct Engine::CaptureState
         juce::String sourceName, title;
         int sceneItemId = 0, order = 0;
         LONG_PTR originalExStyle = 0;
-        std::array<long long, 3> lastTransform { LLONG_MIN, 0, 0 };
+        std::array<long long, 4> lastTransform { LLONG_MIN, 0, 0, 0 };
+    };
+
+    /** Where the scene's Window Capture of the DAW draws the DAW's window. */
+    struct Layout
+    {
+        HWND daw = nullptr;
+        bool clientArea = true;
+        Placement placement;
     };
 
     std::unique_ptr<ObsClient> obs;
@@ -230,6 +331,9 @@ struct Engine::CaptureState
     double frameInterval = 1.0 / 60.0;
     juce::StringArray ignore;
     juce::String exeName;
+    std::optional<Layout> layout;
+    juce::String layoutNote;                                 ///< what was last logged about it
+    std::map<juce::String, std::pair<juce::uint32, juce::var>> inputSettings;   ///< name -> (time fetched, settings)
 };
 
 std::shared_ptr<Engine> Engine::acquire()
@@ -425,6 +529,9 @@ void Engine::connect (const Config& config)
     const double numerator = video["fpsNumerator"], denominator = video["fpsDenominator"];
     const double fps = denominator > 0 ? numerator / denominator : 60.0;
     s.frameInterval = 1.0 / juce::jlimit (30.0, 240.0, fps);
+    s.layout.reset();
+    s.layoutNote = {};
+    s.inputSettings.clear();
 
     const auto sceneList = s.obs->request ("GetSceneList");
     juce::StringArray sceneNames;
@@ -466,13 +573,28 @@ void Engine::follow (const Config& config)
             continue;                               // removed by the next scan
 
         const auto frame = frameRect (hwnd);
-        const auto monitor = monitorRect (hwnd);
-        // The OBS canvas is assumed to show the whole monitor the window is on.
-        const double scale = s.canvasWidth / (double) std::max (1L, monitor.right - monitor.left);
-        const double x = (frame.left - monitor.left) * scale;
-        const double y = (frame.top - monitor.top) * scale;
+        double x, y, scaleX, scaleY;
+        if (s.layout)
+        {
+            // Same place relative to the DAW's capture as the window is relative to the DAW on screen.
+            const auto& p = s.layout->placement;
+            const auto daw = s.layout->clientArea ? clientRect (s.layout->daw) : frameRect (s.layout->daw);
+            scaleX = p.scaleX;
+            scaleY = p.scaleY;
+            x = p.x + (frame.left - daw.left) * scaleX;
+            y = p.y + (frame.top - daw.top) * scaleY;
+        }
+        else
+        {
+            // Without a capture of the DAW, the canvas is assumed to show the whole monitor.
+            const auto monitor = monitorRect (hwnd);
+            scaleX = scaleY = s.canvasWidth / (double) std::max (1L, monitor.right - monitor.left);
+            x = (frame.left - monitor.left) * scaleX;
+            y = (frame.top - monitor.top) * scaleY;
+        }
 
-        const std::array<long long, 3> key { std::llround (x * 10), std::llround (y * 10), std::llround (scale * 1000) };
+        const std::array<long long, 4> key { std::llround (x * 10), std::llround (y * 10),
+                                             std::llround (scaleX * 1000), std::llround (scaleY * 1000) };
         if (key == window.lastTransform)
             continue;
 
@@ -480,7 +602,7 @@ void Engine::follow (const Config& config)
                         J ({ { "sceneName", config.scene },
                              { "sceneItemId", window.sceneItemId },
                              { "sceneItemTransform", J ({ { "positionX", x }, { "positionY", y },
-                                                          { "scaleX", scale }, { "scaleY", scale },
+                                                          { "scaleX", scaleX }, { "scaleY", scaleY },
                                                           { "rotation", 0.0 }, { "alignment", 5 },
                                                           { "boundsType", "OBS_BOUNDS_NONE" } }) } }));
         window.lastTransform = key;
@@ -505,7 +627,8 @@ void Engine::scan (const Config& config)
         excluded = ownWindows;
     }
     std::map<HWND, WindowInfo> current;
-    EnumContext context { s.ignore, excluded, current };
+    std::vector<void*> frontToBack;
+    EnumContext context { s.ignore, excluded, current, frontToBack };
     EnumWindows (collectPluginWindow, (LPARAM) &context);
     bool changed = false;
 
@@ -526,7 +649,7 @@ void Engine::scan (const Config& config)
                      { "inputSettings", J ({ { "window", obsWindowString (info.title, info.cls, s.exeName) },
                                              { "method", 2 },       // Windows 10 (1903 and up) capture
                                              { "priority", 1 },     // match by window title
-                                             { "cursor", false } }) },
+                                             { "cursor", true } }) },
                      { "sceneItemEnabled", true } }));
 
             CaptureState::Tracked window;
@@ -550,8 +673,6 @@ void Engine::scan (const Config& config)
             changed = true;
         }
     }
-
-    follow (config);
 
     for (auto it = s.tracked.begin(); it != s.tracked.end();)
     {
@@ -578,6 +699,14 @@ void Engine::scan (const Config& config)
         changed = true;
     }
 
+    if (! s.tracked.empty())
+    {
+        const auto items = s.obs->request ("GetSceneItemList", J ({ { "sceneName", config.scene } }))["sceneItems"];
+        updateLayout (items);
+        restack (config, items, frontToBack);
+    }
+    follow (config);
+
     if (changed)
     {
         std::vector<const CaptureState::Tracked*> ordered;
@@ -590,6 +719,109 @@ void Engine::scan (const Config& config)
             titles.add (window->title);
         setWindows (titles);
     }
+}
+
+juce::var Engine::settingsOf (const juce::String& inputName)
+{
+    auto& s = *capture;
+    const auto now = juce::Time::getMillisecondCounter();
+    auto cached = s.inputSettings.find (inputName);
+    if (cached == s.inputSettings.end() || now - cached->second.first > 2000)      // fetched at most every 2 s
+    {
+        const auto settings = s.obs->request ("GetInputSettings", J ({ { "inputName", inputName } }))["inputSettings"];
+        cached = s.inputSettings.insert_or_assign (inputName, std::make_pair (now, settings)).first;
+    }
+    return cached->second.second;
+}
+
+void Engine::updateLayout (const juce::var& items)
+{
+    // Find the scene's Window Capture of the DAW, so plugin sources line up with it wherever it is on the
+    // canvas. Without one, the canvas is assumed to show the whole monitor.
+    auto& s = *capture;
+    const auto daw = GetAncestor (s.tracked.begin()->first, GA_ROOTOWNER);
+    const auto dawClass = className (daw);
+
+    const juce::var* best = nullptr;
+    juce::var bestSettings;
+    bool bestMatchesClass = false;
+    if (auto* list = items.getArray())
+    {
+        for (auto& item : *list)
+        {
+            const auto name = item["sourceName"].toString();
+            if (item["inputKind"].toString() != "window_capture" || name.startsWith (sourcePrefix)
+                || ! (bool) item.getProperty ("sceneItemEnabled", true))
+                continue;
+            const auto settings = settingsOf (name);
+            const auto target = parseObsWindowString (settings["window"].toString());
+            if (target.isEmpty() || ! target[2].equalsIgnoreCase (s.exeName))
+                continue;
+            const bool matchesClass = target[1] == dawClass;
+            if (best == nullptr || (matchesClass && ! bestMatchesClass))
+            {
+                best = &item;
+                bestSettings = settings;
+                bestMatchesClass = matchesClass;
+            }
+        }
+    }
+
+    s.layout.reset();
+    juce::String note;
+    Tag tag = Tag::Yellow;
+    if (best == nullptr)
+    {
+        note = "No Window Capture of your DAW in this scene, so plugin sources are placed as if the canvas shows the whole monitor.";
+    }
+    else if (const auto placement = sourceLayout ((*best)["sceneItemTransform"]))
+    {
+        s.layout = CaptureState::Layout { daw, (bool) bestSettings.getProperty ("client_area", true), *placement };
+        note = "Lining plugin sources up with '" + (*best)["sourceName"].toString() + "'.";
+        tag = Tag::Dim;
+    }
+    else
+    {
+        note = "'" + (*best)["sourceName"].toString()
+             + "' is rotated, flipped or not showing, so plugin sources are placed as if the canvas shows the whole monitor.";
+    }
+    if (note != s.layoutNote)
+    {
+        s.layoutNote = note;
+        log (note, tag);
+    }
+}
+
+void Engine::restack (const Config& config, const juce::var& items, const std::vector<void*>& frontToBack)
+{
+    // Order the plugin sources in OBS like their windows on screen, keeping their place in the scene.
+    auto& s = *capture;
+    std::map<int, int> indexOf;                      // scene item id -> index, for this engine's sources
+    if (auto* list = items.getArray())
+        for (auto& item : *list)
+            for (auto& [hwnd, window] : s.tracked)
+                if (window.sceneItemId == (int) item["sceneItemId"])
+                    indexOf[window.sceneItemId] = (int) item["sceneItemIndex"];
+
+    std::vector<int> wanted;                         // back to front
+    for (auto it = frontToBack.rbegin(); it != frontToBack.rend(); ++it)
+        if (auto window = s.tracked.find ((HWND) *it); window != s.tracked.end() && indexOf.count (window->second.sceneItemId) != 0)
+            wanted.push_back (window->second.sceneItemId);
+    if (wanted.size() < 2)
+        return;
+
+    std::vector<int> current;
+    for (auto& [id, index] : indexOf)
+        current.push_back (id);
+    std::sort (current.begin(), current.end(), [&] (int a, int b) { return indexOf[a] < indexOf[b]; });
+    if (current == wanted)
+        return;
+
+    int top = 0;
+    for (auto& [id, index] : indexOf)
+        top = std::max (top, index);
+    for (auto id : wanted)                           // each one moves to the top of the block, so the front window ends last
+        s.obs->request ("SetSceneItemIndex", J ({ { "sceneName", config.scene }, { "sceneItemId", id }, { "sceneItemIndex", top } }));
 }
 
 void Engine::cleanup (bool obsReachable)

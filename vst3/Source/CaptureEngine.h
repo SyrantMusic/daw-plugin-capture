@@ -86,6 +86,9 @@ private:
     void connect (const Config&);
     void scan (const Config&);
     void follow (const Config&);
+    juce::var settingsOf (const juce::String& inputName);
+    void updateLayout (const juce::var& sceneItems);
+    void restack (const Config&, const juce::var& sceneItems, const std::vector<void*>& frontToBack);
     void followUntil (const Config&, std::chrono::steady_clock::time_point nextScan);
     void cleanup (bool obsReachable);
     bool waitUntil (std::chrono::steady_clock::time_point);

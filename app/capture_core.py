@@ -26,7 +26,7 @@ import time
 
 import obsws_python as obs
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 APP_NAME = "DAW Plugin Capture"
 PROJECT_URL = "https://github.com/SyrantMusic/daw-plugin-capture"   # shown in the app's legal notice
@@ -169,6 +169,7 @@ winmm = ctypes.WinDLL("winmm")
 
 GWL_EXSTYLE = -20
 GW_OWNER = 4
+GA_ROOTOWNER = 3
 WS_EX_TOOLWINDOW = 0x80
 SWP_FRAME_ONLY = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020   # NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -188,6 +189,8 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
 user32.EnumWindows.argtypes = [WNDENUMPROC, wt.LPARAM]
 user32.GetWindow.restype = wt.HWND
 user32.GetWindow.argtypes = [wt.HWND, ctypes.c_uint]
+user32.GetAncestor.restype = wt.HWND
+user32.GetAncestor.argtypes = [wt.HWND, ctypes.c_uint]
 user32.MonitorFromWindow.restype = wt.HANDLE
 user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
 user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -251,6 +254,15 @@ def frame_rect(hwnd):
     return r.left, r.top, r.right, r.bottom
 
 
+def client_rect(hwnd):
+    """Client area in screen coordinates."""
+    r = wt.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(r))
+    origin = wt.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(origin))
+    return origin.x, origin.y, origin.x + r.right, origin.y + r.bottom
+
+
 def monitor_rect(hwnd):
     mi = MONITORINFO()
     mi.cbSize = ctypes.sizeof(MONITORINFO)
@@ -270,8 +282,9 @@ def set_exstyle(hwnd, exstyle):
 
 def find_plugin_windows(process, ignore=()):
     """{hwnd: (title, class, exe)} for visible, titled windows of the DAW that are owned by another
-    window. The DAW's main window has no owner, so it is skipped; plugin editors and dialogs are owned.
-    Standard Windows dialogs and titles containing any (lower-case) word in `ignore` are skipped."""
+    window, front-most first. The DAW's main window has no owner, so it is skipped; plugin editors and
+    dialogs are owned. Standard Windows dialogs and titles containing any (lower-case) word in `ignore`
+    are skipped."""
     found = {}
     needle = process.strip().lower()
     if len(needle) < MIN_PROCESS_LEN:
@@ -304,6 +317,60 @@ def obs_window_string(title, cls, exe):
     def esc(s):
         return s.replace("#", "#22").replace(":", "#3A")
     return f"{esc(title)}:{esc(cls)}:{exe}"
+
+
+def parse_obs_window_string(value):
+    """(title, class, exe) from OBS's `window` setting, or None."""
+    parts = (value or "").split(":")
+    if len(parts) != 3:
+        return None
+    return tuple(p.replace("#3A", ":").replace("#22", "#") for p in parts)
+
+
+# obs_alignment flags
+ALIGN_LEFT, ALIGN_RIGHT, ALIGN_TOP, ALIGN_BOTTOM = 1, 2, 4, 8
+
+
+def _aligned(space, flags, low, high):
+    """How far something sits into `space` when aligned to its low edge, high edge or centre."""
+    return 0.0 if flags & low else space if flags & high else space / 2
+
+
+def source_layout(t):
+    """Where a scene item draws its source: (x, y, scale_x, scale_y) such that source pixel (u, v) lands
+    on canvas point (x + u * scale_x, y + v * scale_y). None if the item is rotated, flipped or empty."""
+    crop_l, crop_r = t.get("cropLeft", 0), t.get("cropRight", 0)
+    crop_t, crop_b = t.get("cropTop", 0), t.get("cropBottom", 0)
+    w = t.get("sourceWidth", 0) - crop_l - crop_r
+    h = t.get("sourceHeight", 0) - crop_t - crop_b
+    if w <= 0 or h <= 0 or abs(t.get("rotation", 0.0)) > 0.01:
+        return None
+
+    bounds = t.get("boundsType", "OBS_BOUNDS_NONE")
+    if bounds == "OBS_BOUNDS_NONE":
+        sx, sy = t.get("scaleX", 1.0), t.get("scaleY", 1.0)
+        box_w, box_h, off_x, off_y = w * sx, h * sy, 0.0, 0.0
+    else:
+        box_w, box_h = t.get("boundsWidth", 0.0), t.get("boundsHeight", 0.0)
+        fit_w, fit_h = box_w / w, box_h / h
+        if bounds == "OBS_BOUNDS_STRETCH":
+            sx, sy = fit_w, fit_h
+        else:
+            s = {"OBS_BOUNDS_SCALE_OUTER": max(fit_w, fit_h),
+                 "OBS_BOUNDS_SCALE_TO_WIDTH": fit_w,
+                 "OBS_BOUNDS_SCALE_TO_HEIGHT": fit_h,
+                 "OBS_BOUNDS_MAX_ONLY": min(1.0, fit_w, fit_h)}.get(bounds, min(fit_w, fit_h))
+            sx = sy = s
+        inner = t.get("boundsAlignment", 0)          # where the source sits inside its bounding box
+        off_x = _aligned(box_w - w * sx, inner, ALIGN_LEFT, ALIGN_RIGHT)
+        off_y = _aligned(box_h - h * sy, inner, ALIGN_TOP, ALIGN_BOTTOM)
+    if sx <= 0 or sy <= 0:
+        return None
+
+    align = t.get("alignment", ALIGN_LEFT | ALIGN_TOP)    # which point of the box `position` refers to
+    x = t.get("positionX", 0.0) - _aligned(box_w, align, ALIGN_LEFT, ALIGN_RIGHT) + off_x - crop_l * sx
+    y = t.get("positionY", 0.0) - _aligned(box_h, align, ALIGN_TOP, ALIGN_BOTTOM) + off_y - crop_t * sy
+    return x, y, sx, sy
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -374,9 +441,68 @@ class Engine:
         self.counter = 0
         self.canvas_w = 1920
         self.track_dt = 1 / 60
+        self.layout = None           # (DAW window, client area?, x, y, scale x, scale y) of the DAW's capture
+        self.layout_note = None      # what was last logged about it
+        self.input_settings = {}     # source name -> (time fetched, settings)
 
     def stop(self):
         self.stop_event.set()
+
+    def _settings_of(self, name):
+        """A source's settings, fetched at most every 2 s."""
+        now = time.monotonic()
+        cached = self.input_settings.get(name)
+        if cached is None or now - cached[0] > 2.0:
+            cached = (now, self.cl.get_input_settings(name).input_settings)
+            self.input_settings[name] = cached
+        return cached[1]
+
+    def _update_layout(self, items):
+        """Find the scene's Window Capture of the DAW, so plugin sources line up with it wherever it is
+        on the canvas. Without one, the canvas is assumed to show the whole monitor."""
+        if not self.tracked:
+            return
+        daw = user32.GetAncestor(next(iter(self.tracked)), GA_ROOTOWNER)
+        exe, cls = exe_of(daw).lower(), class_name(daw)
+        best = None
+        for item in items:
+            name = item.get("sourceName", "")
+            if item.get("inputKind") != "window_capture" or name.startswith(SOURCE_PREFIX) \
+                    or not item.get("sceneItemEnabled", True):
+                continue
+            settings = self._settings_of(name)
+            target = parse_obs_window_string(settings.get("window"))
+            if target and target[2].lower() == exe and (best is None or (target[1] == cls) > best[0]):
+                best = (target[1] == cls, item, settings)
+
+        self.layout = None
+        if best is None:
+            note = ("No Window Capture of your DAW in this scene, so plugin sources are placed as if the "
+                    "canvas shows the whole monitor.", "yellow")
+        else:
+            _, item, settings = best
+            geometry = source_layout(item.get("sceneItemTransform") or {})
+            if geometry is None:
+                note = (f"'{item['sourceName']}' is rotated, flipped or not showing, so plugin sources are "
+                        "placed as if the canvas shows the whole monitor.", "yellow")
+            else:
+                self.layout = (daw, settings.get("client_area", True), *geometry)
+                note = (f"Lining plugin sources up with '{item['sourceName']}'.", "dim")
+        if note != self.layout_note:
+            self.layout_note = note
+            self.log(*note)
+
+    def _restack(self, items, front_to_back):
+        """Order the plugin sources in OBS like their windows on screen, keeping their place in the scene."""
+        ours = {w.item for w in self.tracked.values()}
+        index = {i["sceneItemId"]: i["sceneItemIndex"] for i in items if i.get("sceneItemId") in ours}
+        wanted = [self.tracked[h].item for h in reversed(front_to_back)
+                  if h in self.tracked and self.tracked[h].item in index]
+        if len(wanted) < 2 or sorted(index, key=index.get) == wanted:
+            return
+        top = max(index.values())
+        for item in wanted:             # each one moves to the top of the block, so the front window ends last
+            self.cl.set_scene_item_index(self.cfg["scene"], item, top)
 
     def _connect(self):
         self.cl = connect(self.cfg, timeout=5)
@@ -385,6 +511,7 @@ class Engine:
         # Follow window moves once per OBS frame: faster can't show on stream, slower shows as lag.
         fps = video.fps_numerator / video.fps_denominator if video.fps_denominator else 60.0
         self.track_dt = 1.0 / min(max(fps, 30.0), 240.0)
+        self.layout, self.layout_note, self.input_settings = None, None, {}
 
         scenes = [s["sceneName"] for s in self.cl.get_scene_list().scenes]
         if self.cfg["scene"] not in scenes:
@@ -401,10 +528,16 @@ class Engine:
 
     def _transform(self, hwnd):
         left, top, _, _ = frame_rect(hwnd)
-        mon_left, mon_top, mon_right, _ = monitor_rect(hwnd)
-        scale = self.canvas_w / float(mon_right - mon_left)      # the canvas is assumed to show one monitor
-        return {"positionX": (left - mon_left) * scale, "positionY": (top - mon_top) * scale,
-                "scaleX": scale, "scaleY": scale, "rotation": 0.0, "alignment": 5,
+        if self.layout:
+            # Same place relative to the DAW's capture as the window is relative to the DAW on screen.
+            daw, client_area, x, y, sx, sy = self.layout
+            daw_left, daw_top, _, _ = client_rect(daw) if client_area else frame_rect(daw)
+            x, y = x + (left - daw_left) * sx, y + (top - daw_top) * sy
+        else:
+            mon_left, mon_top, mon_right, _ = monitor_rect(hwnd)
+            sx = sy = self.canvas_w / float(mon_right - mon_left)
+            x, y = (left - mon_left) * sx, (top - mon_top) * sy
+        return {"positionX": x, "positionY": y, "scaleX": sx, "scaleY": sy, "rotation": 0.0, "alignment": 5,
                 "boundsType": "OBS_BOUNDS_NONE"}
 
     def _restore_style(self, hwnd, win):
@@ -430,7 +563,7 @@ class Engine:
                     "window": obs_window_string(title, cls, exe),
                     "method": 2,         # Windows 10 (1903 and up) capture
                     "priority": 1,       # match by window title
-                    "cursor": False,
+                    "cursor": True,
                 }, True)
                 self.tracked[hwnd] = _Tracked(name, response.scene_item_id, title, orig)
                 self.log(f"+ {title}", "cyan")
@@ -440,8 +573,6 @@ class Engine:
                 self.log(f"~ {win.title}  ->  {title}", "dim")
                 win.title = title
                 changed = True
-
-        self._follow()
 
         for hwnd in [h for h in self.tracked if h not in current]:
             win = self.tracked.pop(hwnd)
@@ -454,6 +585,12 @@ class Engine:
                 self._restore_style(hwnd, win)
             self.log(f"- {win.title}", "magenta")
             changed = True
+
+        if self.tracked:
+            items = self.cl.get_scene_item_list(scene).scene_items
+            self._update_layout(items)
+            self._restack(items, list(current))
+        self._follow()
 
         if changed:
             self.on_windows([w.title for w in self.tracked.values()])
