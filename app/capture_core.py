@@ -29,7 +29,7 @@ import obsws_python as obs
 __version__ = "1.0.0"
 
 APP_NAME = "DAW Plugin Capture"
-PROJECT_URL = ""                 # set to the public repository URL; shown in the app's legal notice
+PROJECT_URL = "https://github.com/SyrantMusic/daw-plugin-capture"   # shown in the app's legal notice
 SOURCE_PREFIX = "DAWCapture"  # every OBS source the app creates starts with this
 MUTEX_NAME = "Local\\DAWPluginCapture.Engine"   # held while capturing; shared with the VST3
 

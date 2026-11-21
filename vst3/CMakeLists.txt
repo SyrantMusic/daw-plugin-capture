@@ -17,7 +17,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")   # no V
 
 set(JUCE_DIR "" CACHE PATH "Path to a local JUCE checkout (optional)")
 set(JUCE_GIT_TAG "9.0.6" CACHE STRING "JUCE release to download when JUCE_DIR is not set")
-set(PROJECT_URL "" CACHE STRING "Public source repository URL, shown in the plugin's legal notice")
+set(PROJECT_URL "https://github.com/SyrantMusic/daw-plugin-capture" CACHE STRING
+    "Source repository URL, shown in the plugin's legal notice")
 
 if (JUCE_DIR)
     add_subdirectory(${JUCE_DIR} ${CMAKE_BINARY_DIR}/JUCE EXCLUDE_FROM_ALL)
