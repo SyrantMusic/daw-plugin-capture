@@ -21,16 +21,16 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Read version
         id: version
         run: |
-          $version = python -c "import sys; sys.path.insert(0, 'app'); import capture_core; print(capture_core.__version__)"
+          $version = (Select-String -Path app/capture_core.py -Pattern '^__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           $cmake = (Select-String -Path vst3/CMakeLists.txt -Pattern 'project\(\S+ VERSION (\S+)').Matches[0].Groups[1].Value
           if ($version -ne $cmake) { throw "Version mismatch: app $version, VST3 $cmake" }
           if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
@@ -73,7 +73,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v4
         with:
