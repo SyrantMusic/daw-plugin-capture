@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- VST3: the plugin's own window is no longer briefly captured when it is opened while capturing.
+
 ## 1.0.0
 
 First public release.

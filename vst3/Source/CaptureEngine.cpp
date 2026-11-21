@@ -113,11 +113,38 @@ struct EnumContext
     std::map<HWND, WindowInfo>& found;
 };
 
+HMODULE thisModule()
+{
+    static const HMODULE module = []
+    {
+        HMODULE handle = nullptr;
+        GetModuleHandleExW (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR> (&thisModule), &handle);
+        return handle;
+    }();
+    return module;
+}
+
+/** True if the window hosts an editor of this plugin, i.e. contains a window whose class this DLL registered.
+    Unlike the editors' own registration, this also holds while a freshly opened editor is still attaching. */
+bool hostsOwnEditor (HWND hwnd)
+{
+    bool found = false;
+    EnumChildWindows (hwnd, [] (HWND child, LPARAM param) -> BOOL
+    {
+        if ((HMODULE) GetClassLongPtrW (child, GCLP_HMODULE) != thisModule())
+            return TRUE;
+        *reinterpret_cast<bool*> (param) = true;
+        return FALSE;
+    }, (LPARAM) &found);
+    return found;
+}
+
 BOOL CALLBACK collectPluginWindow (HWND hwnd, LPARAM param)
 {
     auto& context = *reinterpret_cast<EnumContext*> (param);
     if (! IsWindowVisible (hwnd) || IsIconic (hwnd) || GetWindow (hwnd, GW_OWNER) == nullptr
-        || ! isInThisProcess (hwnd) || context.ownWindows.count (hwnd) != 0)
+        || ! isInThisProcess (hwnd) || context.ownWindows.count (hwnd) != 0 || hostsOwnEditor (hwnd))
         return TRUE;
 
     const auto title = windowText (hwnd);
