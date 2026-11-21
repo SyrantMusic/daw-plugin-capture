@@ -1,6 +1,6 @@
 # DAW Plugin Capture
 
-Captures plugin windows from DAWs (Serum, Pro-Q, Kontakt, etc) in **OBS Studio**, without the need for `Display Capture`.
+Captures plugin windows from DAWs (Serum, Pro-Q, Kontakt, etc) in **OBS Studio**, without needing to resort for `Display Capture`.
 
 ![Moving a Serum window in Ableton while its OBS source follows it](docs/images/demo.gif)
 
